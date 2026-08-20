@@ -1,0 +1,105 @@
+########################################################################
+# GlitchTip — stack central de erros  (baseado no compose oficial 5.x)
+#
+#   cp .env.example .env   &&   editar .env
+#   docker compose up -d
+#
+# A partir do GlitchTip 5.2 o container web pode rodar tudo (web + worker
+# + beat) via bin/start-all-in-one.sh, então não existe serviço separado
+# de worker aqui. As migrações rodam sozinhas na subida.
+#
+# Dimensionamento: roda em 512 MB. Para ~50 instalações do serviço,
+# 2 vCPU / 4 GB é folgado. Disco: ~30 GB por milhão de eventos/mês.
+########################################################################
+
+x-environment: &default-environment
+  SECRET_KEY: ${SECRET_KEY:?defina SECRET_KEY no .env (openssl rand -hex 32)}
+  DATABASE_URL: postgres://glitchtip:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}@postgres:5432/glitchtip
+  # Deixe vazio ("") para dispensar o Valkey e usar só o Postgres —
+  # funciona, mas fica mais lento. Mantenha o Valkey se puder.
+  VALKEY_URL: redis://valkey:6379/0
+  GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:?ex: https://erros.suaempresa.com.br}
+  DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:?}
+  EMAIL_URL: ${EMAIL_URL:-consolemail://}
+
+  # Cadastro fechado: você convida a equipe pela UI.
+  # (o nome da variável mudou entre versões — manter as duas é inofensivo)
+  ENABLE_OPEN_USER_REGISTRATION: "false"
+  ENABLE_USER_REGISTRATION: "false"
+  ENABLE_ORGANIZATION_CREATION: "false"
+
+  # Retenção de eventos (issues), em dias. Idem: dois nomes, versões diferentes.
+  GLITCHTIP_MAX_EVENT_LIFE_DAYS: ${RETENTION_DAYS:-90}
+  GLITCHTIP_RETENTION_DAYS: ${RETENTION_DAYS:-90}
+
+  # ---- aba Logs -------------------------------------------------------
+  # Este é o volume que enche o disco, não o de erros. Dimensione com calma.
+  GLITCHTIP_ENABLE_LOGS: "true"
+  # Dias que os logs ficam "quentes" no Postgres (consulta rápida).
+  GLITCHTIP_LOG_HOT_DAYS: ${LOG_HOT_DAYS:-7}
+  # Vida total do log, contando o armazenamento frio.
+  GLITCHTIP_LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
+  # Armazenamento frio (DuckDB + Parquet). Sem isto, passado o período
+  # quente o log simplesmente some. Confirme na doc da SUA versão qual
+  # variável aponta o destino (caminho em disco ou bucket S3) e monte um
+  # volume persistente nele — o padrão pode cair dentro do container.
+  GLITCHTIP_ENABLE_DUCKDB: "true"
+
+  PORT: 8000
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: glitchtip
+      POSTGRES_USER: glitchtip
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U glitchtip"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+
+  web:
+    image: glitchtip/glitchtip:v5.2
+    restart: unless-stopped
+    command: ./bin/start-all-in-one.sh
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+    environment: *default-environment
+    volumes:
+      - uploads:/code/uploads
+    ports:
+      # Só no loopback — quem publica na internet é o nginx, com TLS.
+      - "127.0.0.1:8000:8000"
+
+  # ------------------------------------------------------------------
+  # Se um dia a ingestão apertar, tire o `command` do serviço `web`
+  # (volta a ser só web) e habilite o worker abaixo:
+  #
+  # worker:
+  #   image: glitchtip/glitchtip:v5.2
+  #   restart: unless-stopped
+  #   command: ./bin/run-celery-with-beat.sh
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #     valkey:   { condition: service_started }
+  #   environment: *default-environment
+  #   volumes:
+  #     - uploads:/code/uploads
+  # ------------------------------------------------------------------
+
+volumes:
+  pg_data:
+  uploads:

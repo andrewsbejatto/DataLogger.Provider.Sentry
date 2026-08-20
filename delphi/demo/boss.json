@@ -1,0 +1,11 @@
+{
+	"name": "demo",
+	"description": "",
+	"version": "1.0.0",
+	"homepage": "",
+	"mainsrc": "./",
+	"projects": [],
+	"dependencies": {
+		"github.com/git@github.com:dliocode/datalogger": "^3.0.0"
+	}
+}
